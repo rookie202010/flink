@@ -23,10 +23,17 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 import org.apache.flink.table.planner.plan.optimize.program.FlinkChangelogModeInferenceProgram;
 import org.apache.flink.table.planner.plan.trait.RelModifiedMonotonicity;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonSubTypes;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonTypeInfo;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonTypeName;
+
 import org.apache.calcite.rel.RelCollation;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.sql.validate.SqlMonotonicity;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.commons.lang3.StringUtils;
@@ -37,6 +44,13 @@ import java.util.List;
 import java.util.Set;
 
 /** Base class of Strategy to choose different rank process function. */
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+@JsonSubTypes({
+    @JsonSubTypes.Type(value = RankProcessStrategy.UndefinedStrategy.class),
+    @JsonSubTypes.Type(value = RankProcessStrategy.AppendFastStrategy.class),
+    @JsonSubTypes.Type(value = RankProcessStrategy.RetractStrategy.class),
+    @JsonSubTypes.Type(value = RankProcessStrategy.UpdateFastStrategy.class)
+})
 public interface RankProcessStrategy {
 
     UndefinedStrategy UNDEFINED_STRATEGY = new UndefinedStrategy();
@@ -49,8 +63,11 @@ public interface RankProcessStrategy {
      * A placeholder strategy which will be inferred after {@link
      * FlinkChangelogModeInferenceProgram}.
      */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonTypeName("Undefined")
     class UndefinedStrategy implements RankProcessStrategy {
-        private UndefinedStrategy() {}
+        @JsonCreator
+        public UndefinedStrategy() {}
 
         @Override
         public String toString() {
@@ -59,8 +76,11 @@ public interface RankProcessStrategy {
     }
 
     /** A strategy which only works when input only contains insertion changes. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonTypeName("AppendFast")
     class AppendFastStrategy implements RankProcessStrategy {
-        private AppendFastStrategy() {}
+        @JsonCreator
+        public AppendFastStrategy() {}
 
         @Override
         public String toString() {
@@ -69,8 +89,11 @@ public interface RankProcessStrategy {
     }
 
     /** A strategy which works when input contains update or deletion changes. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonTypeName("Retract")
     class RetractStrategy implements RankProcessStrategy {
-        private RetractStrategy() {}
+        @JsonCreator
+        public RetractStrategy() {}
 
         @Override
         public String toString() {
@@ -82,14 +105,21 @@ public interface RankProcessStrategy {
      * A strategy which only works when input shouldn't contains deletion changes and input should
      * have the given {@link #primaryKeys} and should be monotonic on the order by field.
      */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonTypeName("UpdateFast")
     class UpdateFastStrategy implements RankProcessStrategy {
 
+        public static final String FIELD_NAME_PRIMARY_KEYS = "primaryKeys";
+
+        @JsonProperty(FIELD_NAME_PRIMARY_KEYS)
         private final int[] primaryKeys;
 
-        public UpdateFastStrategy(int[] primaryKeys) {
+        @JsonCreator
+        public UpdateFastStrategy(@JsonProperty(FIELD_NAME_PRIMARY_KEYS) int[] primaryKeys) {
             this.primaryKeys = primaryKeys;
         }
 
+        @JsonIgnore
         public int[] getPrimaryKeys() {
             return primaryKeys;
         }
@@ -104,17 +134,18 @@ public interface RankProcessStrategy {
     static List<RankProcessStrategy> analyzeRankProcessStrategies(
             StreamPhysicalRel rank, ImmutableBitSet partitionKey, RelCollation orderKey) {
 
-        RelMetadataQuery mq = rank.getCluster().getMetadataQuery();
+        FlinkRelMetadataQuery mq = (FlinkRelMetadataQuery) rank.getCluster().getMetadataQuery();
         List<RelFieldCollation> fieldCollations = orderKey.getFieldCollations();
         boolean isUpdateStream = !ChangelogPlanUtils.inputInsertOnly(rank);
         RelNode input = rank.getInput(0);
 
         if (isUpdateStream) {
-            Set<ImmutableBitSet> uniqueKeys = mq.getUniqueKeys(input);
-            if (uniqueKeys == null
-                    || uniqueKeys.isEmpty()
-                    // unique key should contains partition key
-                    || uniqueKeys.stream().noneMatch(k -> k.contains(partitionKey))) {
+            Set<ImmutableBitSet> upsertKeys =
+                    mq.getUpsertKeysInKeyGroupRange(input, partitionKey.toArray());
+            if (upsertKeys == null
+                    || upsertKeys.isEmpty()
+                    // upsert key should contains partition key
+                    || upsertKeys.stream().noneMatch(k -> k.contains(partitionKey))) {
                 // and we fall back to using retract rank
                 return Collections.singletonList(RETRACT_STRATEGY);
             } else {
@@ -166,7 +197,7 @@ public interface RankProcessStrategy {
                 if (isMonotonic) {
                     // TODO: choose a set of primary key
                     return Arrays.asList(
-                            new UpdateFastStrategy(uniqueKeys.iterator().next().toArray()),
+                            new UpdateFastStrategy(upsertKeys.iterator().next().toArray()),
                             RETRACT_STRATEGY);
                 } else {
                     return Collections.singletonList(RETRACT_STRATEGY);

@@ -151,7 +151,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
      * Tests that Yarn will restart a killed {@link YarnSessionClusterEntrypoint} which will then
      * resume a persisted {@link JobGraph}.
      */
-    @Test
+    @Test(timeout = 1_000 * 60 * 30)
     public void testKillYarnSessionClusterEntrypoint() throws Exception {
         runTest(
                 () -> {
@@ -186,7 +186,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
                 });
     }
 
-    @Test
+    @Test(timeout = 1_000 * 60 * 30)
     public void testJobRecoversAfterKillingTaskManager() throws Exception {
         runTest(
                 () -> {
@@ -214,7 +214,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
      * Tests that we can retrieve an HA enabled cluster by only specifying the application id if no
      * other high-availability.cluster-id has been configured. See FLINK-20866.
      */
-    @Test
+    @Test(timeout = 1_000 * 60 * 30)
     public void testClusterClientRetrieval() throws Exception {
         runTest(
                 () -> {
@@ -258,6 +258,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
                             >= attemptId;
                 },
                 Deadline.fromNow(TIMEOUT));
+        log.info("Attempt {} id detected.", attemptId);
     }
 
     /** Stops a container running {@link YarnTaskExecutorRunner}. */
@@ -307,8 +308,8 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
 
         CommonTestUtils.waitUntilCondition(
                 () ->
-                        !yarnClient
-                                .getApplications(
+                        !getApplicationReportWithRetryOnNPE(
+                                        yarnClient,
                                         EnumSet.of(
                                                 YarnApplicationState.KILLED,
                                                 YarnApplicationState.FINISHED))
@@ -319,6 +320,7 @@ public class YARNHighAvailabilityITCase extends YarnTestBase {
     private void waitForJobTermination(
             final RestClusterClient<ApplicationId> restClusterClient, final JobID jobId)
             throws Exception {
+        log.info("Sending stop job signal");
         stopJobSignal.signal();
         final CompletableFuture<JobResult> jobResult = restClusterClient.requestJobResult(jobId);
         jobResult.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);

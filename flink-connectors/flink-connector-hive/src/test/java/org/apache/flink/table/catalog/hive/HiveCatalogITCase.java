@@ -27,6 +27,8 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.Types;
 import org.apache.flink.table.api.constraints.UniqueConstraint;
+import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.CatalogTableBuilder;
 import org.apache.flink.table.catalog.ObjectPath;
@@ -34,6 +36,7 @@ import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.descriptors.FileSystem;
 import org.apache.flink.table.descriptors.FormatDescriptor;
 import org.apache.flink.table.descriptors.OldCsv;
+import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.planner.factories.utils.TestCollectionTableFactory;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CollectionUtil;
@@ -102,9 +105,7 @@ public class HiveCatalogITCase {
 
     @Test
     public void testCsvTableViaSQL() {
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inBatchMode().build();
-        TableEnvironment tableEnv = TableEnvironment.create(settings);
+        TableEnvironment tableEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
 
         tableEnv.registerCatalog("myhive", hiveCatalog);
         tableEnv.useCatalog("myhive");
@@ -145,9 +146,7 @@ public class HiveCatalogITCase {
 
     @Test
     public void testCsvTableViaAPI() throws Exception {
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inBatchMode().build();
-        TableEnvironment tableEnv = TableEnvironment.create(settings);
+        TableEnvironment tableEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
         tableEnv.getConfig()
                 .addConfiguration(new Configuration().set(CoreOptions.DEFAULT_PARALLELISM, 1));
 
@@ -226,9 +225,7 @@ public class HiveCatalogITCase {
     @Test
     public void testReadWriteCsv() throws Exception {
         // similar to CatalogTableITCase::testReadWriteCsvUsingDDL but uses HiveCatalog
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
-        TableEnvironment tableEnv = TableEnvironment.create(settings);
+        TableEnvironment tableEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         tableEnv.getConfig()
                 .getConfiguration()
                 .setInteger(TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 1);
@@ -308,13 +305,12 @@ public class HiveCatalogITCase {
     }
 
     private TableEnvironment prepareTable(boolean isStreaming) {
-        EnvironmentSettings.Builder builder = EnvironmentSettings.newInstance().useBlinkPlanner();
+        EnvironmentSettings settings;
         if (isStreaming) {
-            builder = builder.inStreamingMode();
+            settings = EnvironmentSettings.inStreamingMode();
         } else {
-            builder = builder.inBatchMode();
+            settings = EnvironmentSettings.inBatchMode();
         }
-        EnvironmentSettings settings = builder.build();
         TableEnvironment tableEnv = TableEnvironment.create(settings);
         tableEnv.getConfig()
                 .getConfiguration()
@@ -346,9 +342,7 @@ public class HiveCatalogITCase {
 
     @Test
     public void testTableWithPrimaryKey() {
-        EnvironmentSettings.Builder builder = EnvironmentSettings.newInstance().useBlinkPlanner();
-        EnvironmentSettings settings = builder.build();
-        TableEnvironment tableEnv = TableEnvironment.create(settings);
+        TableEnvironment tableEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         tableEnv.getConfig()
                 .getConfiguration()
                 .setInteger(TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 1);
@@ -451,9 +445,7 @@ public class HiveCatalogITCase {
 
     @Test
     public void testTemporaryGenericTable() throws Exception {
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
-        TableEnvironment tableEnv = TableEnvironment.create(settings);
+        TableEnvironment tableEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         tableEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tableEnv.useCatalog(hiveCatalog.getName());
 
@@ -482,5 +474,27 @@ public class HiveCatalogITCase {
         tableEnv.executeSql(
                 "create temporary table blackhole(i int) with ('connector'='blackhole')");
         tableEnv.executeSql("insert into blackhole select * from datagen").await();
+    }
+
+    @Test
+    public void testCreateTableLike() throws Exception {
+        TableEnvironment tableEnv = HiveTestUtils.createTableEnvWithBlinkPlannerBatchMode();
+        tableEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
+        tableEnv.useCatalog(hiveCatalog.getName());
+        tableEnv.executeSql("create table generic_table (x int) with ('connector'='COLLECTION')");
+        tableEnv.useCatalog(EnvironmentSettings.DEFAULT_BUILTIN_CATALOG);
+        tableEnv.executeSql(
+                String.format(
+                        "create table copy like `%s`.`default`.generic_table",
+                        hiveCatalog.getName()));
+        Catalog builtInCat = tableEnv.getCatalog(EnvironmentSettings.DEFAULT_BUILTIN_CATALOG).get();
+        CatalogBaseTable catalogTable =
+                builtInCat.getTable(
+                        new ObjectPath(EnvironmentSettings.DEFAULT_BUILTIN_DATABASE, "copy"));
+        assertEquals(1, catalogTable.getOptions().size());
+        assertEquals("COLLECTION", catalogTable.getOptions().get(FactoryUtil.CONNECTOR.key()));
+        assertEquals(1, catalogTable.getSchema().getFieldCount());
+        assertEquals("x", catalogTable.getSchema().getFieldNames()[0]);
+        assertEquals(DataTypes.INT(), catalogTable.getSchema().getFieldDataTypes()[0]);
     }
 }

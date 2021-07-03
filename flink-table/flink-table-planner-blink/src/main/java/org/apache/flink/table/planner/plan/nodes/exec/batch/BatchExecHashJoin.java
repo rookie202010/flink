@@ -21,7 +21,6 @@ package org.apache.flink.table.planner.plan.nodes.exec.batch;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
-import org.apache.flink.streaming.api.transformations.TwoInputTransformation;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
@@ -30,8 +29,10 @@ import org.apache.flink.table.planner.codegen.LongHashJoinGenerator;
 import org.apache.flink.table.planner.codegen.ProjectionCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
-import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
+import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
+import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
+import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.plan.utils.JoinUtil;
 import org.apache.flink.table.runtime.generated.GeneratedJoinCondition;
@@ -43,24 +44,14 @@ import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
-import org.apache.calcite.rex.RexNode;
-
-import javax.annotation.Nullable;
-
-import java.util.List;
+import java.util.Arrays;
 import java.util.stream.IntStream;
 
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
-
 /** {@link BatchExecNode} for Hash Join. */
-public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExecNode<RowData> {
+public class BatchExecHashJoin extends ExecNodeBase<RowData>
+        implements BatchExecNode<RowData>, SingleTransformationTranslator<RowData> {
 
-    private final FlinkJoinType joinType;
-    private final int[] leftKeys;
-    private final int[] rightKeys;
-    private final boolean[] filterNulls;
-    private final @Nullable RexNode nonEquiCondition;
+    private final JoinSpec joinSpec;
     private final boolean leftIsBuild;
     private final int estimatedLeftAvgRowSize;
     private final int estimatedRightAvgRowSize;
@@ -69,29 +60,19 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
     private final boolean tryDistinctBuildRow;
 
     public BatchExecHashJoin(
-            FlinkJoinType joinType,
-            int[] leftKeys,
-            int[] rightKeys,
-            boolean[] filterNulls,
-            @Nullable RexNode nonEquiCondition,
+            JoinSpec joinSpec,
             int estimatedLeftAvgRowSize,
             int estimatedRightAvgRowSize,
             long estimatedLeftRowCount,
             long estimatedRightRowCount,
             boolean leftIsBuild,
             boolean tryDistinctBuildRow,
-            List<ExecEdge> inputEdges,
+            InputProperty leftInputProperty,
+            InputProperty rightInputProperty,
             RowType outputType,
             String description) {
-        super(inputEdges, outputType, description);
-        this.joinType = checkNotNull(joinType);
-        this.leftKeys = checkNotNull(leftKeys);
-        this.rightKeys = checkNotNull(rightKeys);
-        this.filterNulls = checkNotNull(filterNulls);
-        checkArgument(leftKeys.length > 0 && leftKeys.length == rightKeys.length);
-        checkArgument(leftKeys.length == filterNulls.length);
-
-        this.nonEquiCondition = nonEquiCondition;
+        super(Arrays.asList(leftInputProperty, rightInputProperty), outputType, description);
+        this.joinSpec = joinSpec;
         this.leftIsBuild = leftIsBuild;
         this.estimatedLeftAvgRowSize = estimatedLeftAvgRowSize;
         this.estimatedRightAvgRowSize = estimatedRightAvgRowSize;
@@ -103,22 +84,29 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
     @Override
     @SuppressWarnings("unchecked")
     protected Transformation<RowData> translateToPlanInternal(PlannerBase planner) {
-        ExecNode<RowData> leftInputNode = (ExecNode<RowData>) getInputNodes().get(0);
-        ExecNode<RowData> rightInputNode = (ExecNode<RowData>) getInputNodes().get(1);
+        ExecEdge leftInputEdge = getInputEdges().get(0);
+        ExecEdge rightInputEdge = getInputEdges().get(1);
 
-        Transformation<RowData> leftInputTransform = leftInputNode.translateToPlan(planner);
-        Transformation<RowData> rightInputTransform = rightInputNode.translateToPlan(planner);
-        // get type
-        RowType leftType = (RowType) leftInputNode.getOutputType();
-        RowType rightType = (RowType) rightInputNode.getOutputType();
+        Transformation<RowData> leftInputTransform =
+                (Transformation<RowData>) leftInputEdge.translateToPlan(planner);
+        Transformation<RowData> rightInputTransform =
+                (Transformation<RowData>) rightInputEdge.translateToPlan(planner);
+        // get input types
+        RowType leftType = (RowType) leftInputEdge.getOutputType();
+        RowType rightType = (RowType) rightInputEdge.getOutputType();
 
+        JoinUtil.validateJoinSpec(joinSpec, leftType, rightType, false);
+
+        int[] leftKeys = joinSpec.getLeftKeys();
+        int[] rightKeys = joinSpec.getRightKeys();
         LogicalType[] keyFieldTypes =
                 IntStream.of(leftKeys).mapToObj(leftType::getTypeAt).toArray(LogicalType[]::new);
         RowType keyType = RowType.of(keyFieldTypes);
 
         TableConfig config = planner.getTableConfig();
         GeneratedJoinCondition condFunc =
-                JoinUtil.generateConditionFunction(config, nonEquiCondition, leftType, rightType);
+                JoinUtil.generateConditionFunction(
+                        config, joinSpec.getNonEquiCondition().orElse(null), leftType, rightType);
 
         // projection for equals
         GeneratedProjection leftProj =
@@ -178,6 +166,7 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
 
         // operator
         StreamOperatorFactory<RowData> operator;
+        FlinkJoinType joinType = joinSpec.getJoinType();
         HashJoinType hashJoinType =
                 HashJoinType.of(
                         leftIsBuild,
@@ -185,7 +174,7 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
                         joinType.isRightOuter(),
                         joinType == FlinkJoinType.SEMI,
                         joinType == FlinkJoinType.ANTI);
-        if (LongHashJoinGenerator.support(hashJoinType, keyType, filterNulls)) {
+        if (LongHashJoinGenerator.support(hashJoinType, keyType, joinSpec.getFilterNulls())) {
             operator =
                     LongHashJoinGenerator.gen(
                             config,
@@ -206,7 +195,7 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
                                     hashJoinType,
                                     condFunc,
                                     reverseJoin,
-                                    filterNulls,
+                                    joinSpec.getFilterNulls(),
                                     buildProj,
                                     probeProj,
                                     tryDistinctBuildRow,
@@ -217,23 +206,17 @@ public class BatchExecHashJoin extends ExecNodeBase<RowData> implements BatchExe
         }
 
         long managedMemory =
-                ExecNodeUtil.getMemorySize(
-                        config, ExecutionConfigOptions.TABLE_EXEC_RESOURCE_HASH_JOIN_MEMORY);
+                config.getConfiguration()
+                        .get(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_HASH_JOIN_MEMORY)
+                        .getBytes();
 
-        TwoInputTransformation<RowData, RowData, RowData> transform =
-                ExecNodeUtil.createTwoInputTransformation(
-                        buildTransform,
-                        probeTransform,
-                        getDesc(),
-                        operator,
-                        InternalTypeInfo.of(getOutputType()),
-                        probeTransform.getParallelism(),
-                        managedMemory);
-
-        if (inputsContainSingleton()) {
-            transform.setParallelism(1);
-            transform.setMaxParallelism(1);
-        }
-        return transform;
+        return ExecNodeUtil.createTwoInputTransformation(
+                buildTransform,
+                probeTransform,
+                getDescription(),
+                operator,
+                InternalTypeInfo.of(getOutputType()),
+                probeTransform.getParallelism(),
+                managedMemory);
     }
 }

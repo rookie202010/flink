@@ -30,6 +30,7 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.plugin.PluginManager;
 import org.apache.flink.core.plugin.PluginUtils;
 import org.apache.flink.runtime.entrypoint.StandaloneSessionClusterEntrypoint;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorResourceUtils;
 import org.apache.flink.runtime.taskexecutor.TaskManagerRunner;
 import org.apache.flink.runtime.util.BlobServerResource;
 import org.apache.flink.runtime.zookeeper.ZooKeeperResource;
@@ -48,6 +49,7 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -89,7 +91,7 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
         File coordinateTempDir = null;
 
         Configuration config = new Configuration();
-        config.setString(AkkaOptions.ASK_TIMEOUT, "100 s");
+        config.set(AkkaOptions.ASK_TIMEOUT_DURATION, Duration.ofSeconds(100));
         config.setString(JobManagerOptions.ADDRESS, "localhost");
         config.setString(RestOptions.BIND_PORT, "0");
         config.setLong(HeartbeatManagerOptions.HEARTBEAT_INTERVAL, 500L);
@@ -107,6 +109,7 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
         config.set(TaskManagerOptions.TASK_HEAP_MEMORY, MemorySize.parse("128m"));
         config.set(TaskManagerOptions.CPU_CORES, 1.0);
         config.setString(JobManagerOptions.EXECUTION_FAILOVER_STRATEGY, "full");
+        config.set(JobManagerOptions.RESOURCE_WAIT_TIMEOUT, Duration.ofSeconds(30L));
 
         try (final StandaloneSessionClusterEntrypoint clusterEntrypoint =
                 new StandaloneSessionClusterEntrypoint(config)) {
@@ -333,10 +336,11 @@ public abstract class AbstractTaskManagerProcessFailureRecoveryTest extends Test
                 Configuration cfg = parameterTool.getConfiguration();
                 final PluginManager pluginManager =
                         PluginUtils.createPluginManagerFromRootFolder(cfg);
+                TaskExecutorResourceUtils.adjustForLocalExecution(cfg);
 
                 TaskManagerRunner.runTaskManager(cfg, pluginManager);
             } catch (Throwable t) {
-                LOG.error("Failed to start TaskManager process", t);
+                LOG.error("Failed to run the TaskManager process", t);
                 System.exit(1);
             }
         }

@@ -20,6 +20,7 @@ package org.apache.flink.formats.json;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.serialization.SerializationSchema;
+import org.apache.flink.formats.common.TimestampFormat;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -95,7 +96,7 @@ public class JsonRowDataSerializationSchema implements SerializationSchema<RowDa
             runtimeConverter.convert(mapper, node, row);
             return mapper.writeValueAsBytes(node);
         } catch (Throwable t) {
-            throw new RuntimeException("Could not serialize row '" + row + "'. ", t);
+            throw new RuntimeException(String.format("Could not serialize row '%s'.", row), t);
         }
     }
 

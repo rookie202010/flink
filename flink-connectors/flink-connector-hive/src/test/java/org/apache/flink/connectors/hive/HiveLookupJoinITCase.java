@@ -22,6 +22,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.SqlDialect;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.internal.TableEnvironmentInternal;
 import org.apache.flink.table.api.internal.TableImpl;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
@@ -65,9 +66,7 @@ public class HiveLookupJoinITCase {
 
     @BeforeClass
     public static void setup() {
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().inStreamingMode().useBlinkPlanner().build();
-        tableEnv = TableEnvironment.create(settings);
+        tableEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         hiveCatalog = HiveTestUtils.createHiveCatalog();
         tableEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tableEnv.useCatalog(hiveCatalog.getName());
@@ -359,6 +358,7 @@ public class HiveLookupJoinITCase {
 
     private FileSystemLookupFunction<HiveTablePartition> getLookupFunction(String tableName)
             throws Exception {
+        TableEnvironmentInternal tableEnvInternal = (TableEnvironmentInternal) tableEnv;
         ObjectIdentifier tableIdentifier =
                 ObjectIdentifier.of(hiveCatalog.getName(), "default", tableName);
         CatalogTable catalogTable =
@@ -368,7 +368,9 @@ public class HiveLookupJoinITCase {
                         FactoryUtil.createTableSource(
                                 hiveCatalog,
                                 tableIdentifier,
-                                catalogTable,
+                                tableEnvInternal
+                                        .getCatalogManager()
+                                        .resolveCatalogTable(catalogTable),
                                 tableEnv.getConfig().getConfiguration(),
                                 Thread.currentThread().getContextClassLoader(),
                                 false);

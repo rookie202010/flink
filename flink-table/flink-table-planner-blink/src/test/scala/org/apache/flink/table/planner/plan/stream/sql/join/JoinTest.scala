@@ -284,4 +284,53 @@ class JoinTest extends TableTestBase {
   def testRightOuterJoinEquiAndNonEquiPred(): Unit = {
     util.verifyExecPlan("SELECT b, y FROM t RIGHT OUTER JOIN s ON a = z AND b < x")
   }
+
+  @Test
+  def testJoinAndSelectOnPartialCompositePrimaryKey(): Unit = {
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE tableWithCompositePk (
+        |  pk1 INT,
+        |  pk2 BIGINT,
+        |  PRIMARY KEY (pk1, pk2) NOT ENFORCED
+        |) WITH (
+        |  'connector'='values'
+        |)
+        |""".stripMargin)
+    util.verifyExecPlan("SELECT A.a1 FROM A LEFT JOIN tableWithCompositePk T ON A.a1 = T.pk1")
+  }
+
+  @Test
+  def testJoinDisorderChangeLog(): Unit = {
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE src (person String, votes BIGINT) WITH(
+        |  'connector' = 'values'
+        |)
+        |""".stripMargin)
+
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE award (votes BIGINT, prize DOUBLE, PRIMARY KEY(votes) NOT ENFORCED) WITH(
+        |  'connector' = 'values'
+        |)
+        |""".stripMargin)
+
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE people (person STRING, age INT, PRIMARY KEY(person) NOT ENFORCED) WITH(
+        |  'connector' = 'values'
+        |)
+        |""".stripMargin)
+
+    util.verifyExecPlan(
+      """
+        |SELECT T1.person, T1.sum_votes, T1.prize, T2.age FROM
+        | (SELECT T.person, T.sum_votes, award.prize FROM
+        |   (SELECT person, SUM(votes) AS sum_votes FROM src GROUP BY person) T,
+        |   award
+        |   WHERE T.sum_votes = award.votes) T1, people T2
+        | WHERE T1.person = T2.person
+        |""".stripMargin)
+  }
 }

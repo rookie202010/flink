@@ -39,9 +39,7 @@ public class PostgresCatalogITCase extends PostgresCatalogTestBase {
 
     @Before
     public void setup() {
-        EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
-        this.tEnv = TableEnvironment.create(settings);
+        this.tEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         tEnv.getConfig()
                 .getConfiguration()
                 .setInteger(TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM.key(), 1);
@@ -173,7 +171,9 @@ public class PostgresCatalogITCase extends PostgresCatalogTestBase {
                         + "[b, c, d], "
                         + "[2016-06-22T19:10:25, 2019-06-22T19:10:25], "
                         + "[2015-01-01, 2020-01-01], "
-                        + "[00:51:03, 00:59:03]]]",
+                        + "[00:51:03, 00:59:03], "
+                        + "null, "
+                        + "null]]",
                 results.toString());
     }
 

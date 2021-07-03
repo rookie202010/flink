@@ -18,12 +18,6 @@
 
 package org.apache.flink.table.planner.codegen
 
-import java.math.{BigDecimal => JBigDecimal}
-import java.time.ZoneOffset
-
-import org.apache.calcite.avatica.util.ByteString
-import org.apache.calcite.util.TimestampString
-import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.typeinfo.{AtomicType => AtomicTypeInfo}
 import org.apache.flink.api.java.typeutils.GenericTypeInfo
@@ -34,13 +28,20 @@ import org.apache.flink.table.data.writer.BinaryRowWriter
 import org.apache.flink.table.planner.codegen.CodeGenUtils._
 import org.apache.flink.table.planner.codegen.GeneratedExpression.{ALWAYS_NULL, NEVER_NULL, NO_CODE}
 import org.apache.flink.table.planner.codegen.calls.CurrentTimePointCallGen
-import org.apache.flink.table.planner.plan.nodes.exec.utils.SortSpec
+import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec
 import org.apache.flink.table.planner.plan.utils.SortUtil
 import org.apache.flink.table.runtime.typeutils.TypeCheckUtils.{isCharacterString, isReference, isTemporal}
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
 import org.apache.flink.table.types.logical._
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldCount, getFieldTypes}
 import org.apache.flink.table.util.TimestampStringUtils.toLocalDateTime
+
+import org.apache.calcite.avatica.util.ByteString
+import org.apache.calcite.util.TimestampString
+import org.apache.commons.lang3.StringEscapeUtils
+
+import java.math.{BigDecimal => JBigDecimal}
+import java.time.ZoneOffset
 
 import scala.annotation.tailrec
 import scala.collection.mutable
@@ -131,9 +132,10 @@ object GenerateUtils {
     */
   def generateStringResultCallIfArgsNotNull(
       ctx: CodeGeneratorContext,
-      operands: Seq[GeneratedExpression])
+      operands: Seq[GeneratedExpression],
+      returnType: LogicalType)
       (call: Seq[String] => String): GeneratedExpression = {
-    generateCallIfArgsNotNull(ctx, new VarCharType(VarCharType.MAX_LENGTH), operands) {
+    generateCallIfArgsNotNull(ctx, returnType, operands) {
       args => s"$BINARY_STRING.fromString(${call(args)})"
     }
   }
@@ -145,9 +147,10 @@ object GenerateUtils {
     */
   def generateStringResultCallWithStmtIfArgsNotNull(
       ctx: CodeGeneratorContext,
-      operands: Seq[GeneratedExpression])
+      operands: Seq[GeneratedExpression],
+      returnType: LogicalType)
       (call: Seq[String] => (String, String)): GeneratedExpression = {
-    generateCallWithStmtIfArgsNotNull(ctx, new VarCharType(VarCharType.MAX_LENGTH), operands) {
+    generateCallWithStmtIfArgsNotNull(ctx, returnType, operands) {
       args =>
         val (stmt, result) = call(args)
         (stmt, s"$BINARY_STRING.fromString($result)")
@@ -489,7 +492,7 @@ object GenerateUtils {
   def generateProctimeTimestamp(
       ctx: CodeGeneratorContext,
       contextTerm: String): GeneratedExpression = {
-    val resultType = new TimestampType(3)
+    val resultType = new LocalZonedTimestampType(3)
     val resultTypeTerm = primitiveTypeTermForType(resultType)
     val resultTerm = ctx.addReusableLocalVariable(resultTypeTerm, "result")
     val resultCode =
@@ -503,26 +506,33 @@ object GenerateUtils {
 
   def generateCurrentTimestamp(
       ctx: CodeGeneratorContext): GeneratedExpression = {
-    new CurrentTimePointCallGen(false).generate(ctx, Seq(), new TimestampType(3))
+    new CurrentTimePointCallGen(true, true).generate(ctx, Seq(), new LocalZonedTimestampType(3))
   }
 
   def generateRowtimeAccess(
       ctx: CodeGeneratorContext,
-      contextTerm: String): GeneratedExpression = {
-    val resultType = new TimestampType(true, TimestampKind.ROWTIME, 3)
+      contextTerm: String,
+      isTimestampLtz: Boolean): GeneratedExpression = {
+    val resultType = if (isTimestampLtz) {
+      new LocalZonedTimestampType(true, TimestampKind.ROWTIME, 3)
+    } else {
+      new TimestampType(true, TimestampKind.ROWTIME, 3)
+    }
     val resultTypeTerm = primitiveTypeTermForType(resultType)
-    val Seq(resultTerm, nullTerm) = ctx.addReusableLocalVariables(
+    val Seq(resultTerm, nullTerm, timestamp) = ctx.addReusableLocalVariables(
       (resultTypeTerm, "result"),
-      ("boolean", "isNull"))
+      ("boolean", "isNull"),
+      ("Long", "timestamp"))
 
     val accessCode =
       s"""
-         |$resultTerm = $TIMESTAMP_DATA.fromEpochMillis($contextTerm.timestamp());
-         |if ($resultTerm == null) {
-         |  throw new RuntimeException("Rowtime timestamp is null. Please make sure that a " +
-         |    "proper TimestampAssigner is defined and the stream environment uses the EventTime " +
-         |    "time characteristic.");
+         |$timestamp = $contextTerm.timestamp();
+         |if ($timestamp == null) {
+         |  throw new RuntimeException("Rowtime timestamp is not defined. Please make sure that " +
+         |    "a proper TimestampAssigner is defined and the stream environment " +
+         |    "uses the EventTime time characteristic.");
          |}
+         |$resultTerm = $TIMESTAMP_DATA.fromEpochMillis($timestamp);
          |$nullTerm = false;
        """.stripMargin.trim
 
@@ -531,6 +541,26 @@ object GenerateUtils {
       nullTerm,
       accessCode,
       resultType)
+  }
+
+  def generateWatermark(
+      ctx: CodeGeneratorContext,
+      contextTerm: String,
+      resultType: LogicalType): GeneratedExpression = {
+    val resultTypeTerm = primitiveTypeTermForType(resultType)
+    val Seq(resultTerm, nullTerm, currentWatermarkTerm) = ctx.addReusableLocalVariables(
+      (resultTypeTerm, "result"),
+      ("boolean", "isNull"),
+      ("long", "currentWatermark")
+    )
+
+    val code =
+      s"""
+         |$currentWatermarkTerm = $contextTerm.timerService().currentWatermark();
+         |$nullTerm = ($currentWatermarkTerm == java.lang.Long.MIN_VALUE);
+         |$resultTerm = $TIMESTAMP_DATA.fromEpochMillis($currentWatermarkTerm);
+         |""".stripMargin.trim
+    GeneratedExpression(resultTerm, nullTerm, code, resultType)
   }
 
   /**
@@ -875,7 +905,7 @@ object GenerateUtils {
 
     val fieldTypes = getFieldTypes(inputType)
     val compares = new mutable.ArrayBuffer[String]
-    sortSpec.getFieldSpecs.foreach(fieldSpec => {
+    sortSpec.getFieldSpecs.foreach { fieldSpec =>
       val index = fieldSpec.getFieldIndex
       val symbol = if (fieldSpec.getIsAscendingOrder) "" else "-"
       val nullIsLastRet = if (fieldSpec.getNullIsLast) 1 else -1
@@ -902,62 +932,6 @@ object GenerateUtils {
            |  $typeTerm $fieldA = ${rowFieldReadAccess(ctx, index, leftTerm, t)};
            |  $typeTerm $fieldB = ${rowFieldReadAccess(ctx, index, rightTerm, t)};
            |  int $comp = ${generateCompare(ctx, t, fieldSpec.getNullIsLast, fieldA, fieldB)};
-           |  if ($comp != 0) {
-           |    return $symbol$comp;
-           |  }
-           |}
-         """.stripMargin
-      compares += code
-    })
-    compares.mkString
-  }
-
-  /**
-   * Generates code for comparing row keys.
-   * TODO: Remove this after [[MultiFieldRangeBoundComparatorCodeGenerator]]
-   * is refactored using SortSpec.
-   */
-  def generateRowCompare(
-    ctx: CodeGeneratorContext,
-    keys: Array[Int],
-    keyTypes: Array[LogicalType],
-    orders: Array[Boolean],
-    nullsIsLast: Array[Boolean],
-    leftTerm: String,
-    rightTerm: String): String = {
-
-    val compares = new mutable.ArrayBuffer[String]
-
-    for (i <- keys.indices) {
-      val index = keys(i)
-
-      val symbol = if (orders(i)) "" else "-"
-
-      val nullIsLastRet = if (nullsIsLast(i)) 1 else -1
-
-      val t = keyTypes(i)
-
-      val typeTerm = primitiveTypeTermForType(t)
-      val fieldA = newName("fieldA")
-      val isNullA = newName("isNullA")
-      val fieldB = newName("fieldB")
-      val isNullB = newName("isNullB")
-      val comp = newName("comp")
-
-      val code =
-        s"""
-           |boolean $isNullA = $leftTerm.isNullAt($index);
-           |boolean $isNullB = $rightTerm.isNullAt($index);
-           |if ($isNullA && $isNullB) {
-           |  // Continue to compare the next element
-           |} else if ($isNullA) {
-           |  return $nullIsLastRet;
-           |} else if ($isNullB) {
-           |  return ${-nullIsLastRet};
-           |} else {
-           |  $typeTerm $fieldA = ${rowFieldReadAccess(ctx, index, leftTerm, t)};
-           |  $typeTerm $fieldB = ${rowFieldReadAccess(ctx, index, rightTerm, t)};
-           |  int $comp = ${generateCompare(ctx, t, nullsIsLast(i), fieldA, fieldB)};
            |  if ($comp != 0) {
            |    return $symbol$comp;
            |  }
